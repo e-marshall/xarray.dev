@@ -1,6 +1,12 @@
 ---
 title: Vector data cubes in Xarray
-description: Thanks to Xvec and developments across a number of packages, the Xarray ecosystem now supports data cubes with vector geometries as coordinate locations.
+date: '2024-08-29'
+authors:
+  - name: Emma Marshall
+    github: e-marshall
+  - name: Martin Fleischmann
+    github: martinfleis
+summary: 'Thanks to Xvec and developments across a number of packages, the Xarray ecosystem now supports data cubes with vector geometries as coordinate locations.'---
 ---
 
 Geospatial datasets representing information about real-world features as points, lines, and polygons are increasingly large, complex, and multidimensional. They are naturally represented as vector data cubes: n-dimensional arrays where at least one dimension is a set of vector geometries. The Xarray ecosystem now supports vector data cubes thanks to Xvec, a package designed for working with vector geometries within the Xarray data model 🎉. For those familiar with GeoPandas, Xvec is to Xarray as GeoPandas is to Pandas.
@@ -110,8 +116,8 @@ We've created an vector data cube (`europe_ds`) storing data about European citi
 import xvec
 
 era5_europe_cities = era5_ds_sub.xvec.extract_points(
-    cities_eur.geometry, x_coords="longitude", y_coords="latitude"
-).drop_vars("index")
+    cities_eur.geometry, x_coords="longitude", y_coords="latitude", index=False
+)
 era5_europe_cities
 ```
 
@@ -138,13 +144,24 @@ We can select points based on geometry and proximity to other points using the `
 max_temp_city = era5_europe_cities.isel(
     **era5_europe_cities["2m_temperature"].argmax(dim=["time", "geometry"])
 )
+
 max_temp_buffer = era5_europe_cities.xvec.query(
-    "geometry", max_temp_city["geometry"].data.item().buffer(0.5)
+    "geometry", max_temp_city["geometry"].data.item(), predicate="dwithin", distance=0.5
 )
 max_temp_buffer
 ```
 
 ![max_temp](/posts/vector-data-cubes/max_temp.png)
+
+The spatial indexing is also enabled directly within the `DataArray.sel` method.
+
+```python
+max_temp_buffer = era5_europe_cities.sel(
+    geometry=max_temp_city["geometry"].data.item().buffer(0.5), method="intersects"
+)
+```
+
+Just note that any other method than "nearest" (which will get the spatially nearest point) or None, will work only for scalar geometries. For anything else, `.xvec.query` is better suited.
 
 ### 2. Raster analysis
 
@@ -169,6 +186,36 @@ Let's visualize a single season:
 ```
 
 ![explore](/posts/vector-data-cubes/explore.png)
+
+### 3. Projection support
+
+Xvec automatically tries to track the CRS of the GeometryIndex and allows us to transform geometries between different projections if we need to align it with the raster projection. For example, if we want to do some
+distance-based operation on the data cube, we will need to use a projected CRS as Shapely assumes operations on a plane.
+
+```python
+era5_europe_cities_3857 = era5_europe_cities.xvec.to_crs(geometry="EPSG:3857")
+```
+
+### 4. Zonal statistics
+
+While extracting point data is useful, if we deal with either linestrings or polygons, we need to aggregate the data from the raster. Xvec natively supports several implementations of zonal statistics, all returning a vector data cube.
+
+The default method `"rasterize"` assumes large non-overlapping polygons and small raster pixels and is very performant, albeit a bit more memory demanding than the other options. Method `"iterate"` is feasible for cases with overlapping polygons and those that may not be larger than a few pixels and could be potentially lost in the rasterization process. While slower, it is significantly more memory efficient. Both of these depend on `rasterio`, which is not the case for the third method `"exactextract"`, which uses the Python package of the same name and is aimed at cases where we care about the amount of pixel area covered by a polygon. For details, see the Xvec's [documentation](https://xvec.readthedocs.io/en/stable/zonal_stats.html).
+
+## Saving vector data cube
+
+As you may have guessed, serialising vector data cubes to a disk is not as straightforward as raster data cubes or vector data frames. Luckily, vector geometries can be represented using a series of arrays following CF conventions and the whole data cube can then be serialised to Zarr or NetCDF.
+
+```python
+cf_encoded = era5_europe_cities.xvec.encode_cf()
+cf_enconded.to_zarr("era5_europe_cities.zarr")
+```
+
+The file can then be loaded and decoded back to a vector data cube.
+
+```python
+roundtripped = xr.open_zarr("era5_europe_cities.zarr").xvec.decode_cf()
+```
 
 ## Wrap up
 
